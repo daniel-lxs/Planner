@@ -8,10 +8,10 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { PlannerDatabase } from './database.js';
 import { formatDate } from './utils.js';
+
 interface ExportPlanArgs {
   plan_id: string;
 }
-
 
 interface ToolDefinition {
   name: string;
@@ -37,6 +37,7 @@ interface GetActiveStepArgs {
 
 interface CompleteStepArgs {
   step_id: string;
+  completion_context: string;
 }
 
 interface FailStepArgs {
@@ -209,6 +210,10 @@ class PlannerServer {
             step_id: {
               type: 'string',
               description: 'ID of the step to mark as complete',
+            },
+            completion_context: {
+              type: 'string',
+              description: 'Summary of changes made during step execution',
             },
           },
           required: ['step_id'],
@@ -449,7 +454,10 @@ class PlannerServer {
           {
             type: 'text',
             text: step
-              ? `Active step ID: ${step.id}\nDescription: ${step.description}\nCompletion condition: ${step.completion_condition}`
+              ? `Active step ID: ${step.id}\nDescription: ${step.description}\nCompletion condition: ${step.completion_condition}` +
+                (step.completion_context && step.status === 'completed'
+                  ? `\nCompletion Context: ${step.completion_context}`
+                  : '')
               : 'No active step found',
           },
         ],
@@ -467,7 +475,7 @@ class PlannerServer {
     const typedArgs = args as CompleteStepArgs;
 
     try {
-      const nextStep = await this.db.completeStep(typedArgs.step_id);
+      const nextStep = await this.db.completeStep(typedArgs.step_id, typedArgs.completion_context);
       return {
         content: [
           {
@@ -522,12 +530,13 @@ class PlannerServer {
         content: [
           {
             type: 'text',
-            text: steps
-              .map(
-                step =>
-                  `Step ID: ${step.id}\nDescription: ${step.description}\nStatus: ${step.status}\nCompletion condition: ${step.completion_condition}\n`,
-              )
-              .join('\n'),
+            text: steps.map(step => {
+              const baseInfo = `Step ID: ${step.id}\nDescription: ${step.description}\nStatus: ${step.status}\nCompletion condition: ${step.completion_condition}`;
+              const contextInfo = step.completion_context && step.status === 'completed'
+                ? `\nCompletion Context: ${step.completion_context}`
+                : '';
+              return baseInfo + contextInfo;
+            }).join('\n\n'),
           },
         ],
       };
@@ -539,7 +548,7 @@ class PlannerServer {
 
   private async handleExportPlan(
     args: unknown,
-  ): Promise<{ content: { type: string; text: string }[] }> {
+  ): Promise<{ content: { type: 'text'; text: string }[] }> {
     this.validateArgs<ExportPlanArgs>(args, ['plan_id']);
     const typedArgs = args as ExportPlanArgs;
 
@@ -550,10 +559,8 @@ class PlannerServer {
       }
 
       const steps = await this.db.listSteps(typedArgs.plan_id);
-      // Sort steps by their order to ensure they're displayed in the correct sequence
       steps.sort((a, b) => a.step_order - b.step_order);
 
-      // Calculate plan status - a plan is completed only if all steps are completed
       const planStatus = steps.length > 0 && steps.every(step => step.status === 'completed') 
         ? 'Completed' 
         : 'In Progress';
@@ -565,7 +572,6 @@ class PlannerServer {
         `\n**Created:** ${formatDate(plan.created_at)}`,
         `\n## Steps`,
         ...steps.map(step => {
-          // Step status is determined by its database status and whether it's the active step
           const status = step.status === 'completed' ? 'Completed' 
             : step.status === 'failed' ? 'Failed'
             : step.id === plan.active_step_id ? 'In Progress'
@@ -575,6 +581,9 @@ class PlannerServer {
             `\n### ${step.description} (ID: ${step.id})`,
             `- **Status:** ${status}`,
             `- **Completion Condition:** ${step.completion_condition}`,
+            step.completion_context && step.status === 'completed'
+              ? `- **Completion Context:**\n${step.completion_context}`
+              : '',
             `- **Created:** ${formatDate(step.created_at)}`,
           ].join('\n');
         }),

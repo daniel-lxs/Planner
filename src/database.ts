@@ -12,7 +12,8 @@ export interface Plan extends AnyObject {
   id: string;
   name: string;
   description: string;
-  created_at: string;
+  created_at: string; 
+  completion_context: string | null;
   active_step_id: string | null;
 }
 
@@ -24,6 +25,7 @@ export interface Step extends AnyObject {
   status: 'in_progress' | 'completed' | 'failed';
   step_order: number;
   created_at: string;
+  completion_context: string | null;
 }
 
 interface StepCountRow {
@@ -44,6 +46,7 @@ interface StepRow extends AnyObject {
   description: string;
   completion_condition: string;
   status: 'in_progress' | 'completed' | 'failed';
+  completion_context: string | null;
   step_order: number;
   created_at: string;
 }
@@ -68,7 +71,8 @@ function isStep(obj: AnyObject): obj is Step {
     typeof obj.completion_condition === 'string' &&
     ['in_progress', 'completed', 'failed'].includes(obj.status as string) &&
     typeof obj.step_order === 'number' &&
-    typeof obj.created_at === 'string'
+    typeof obj.created_at === 'string' &&
+    (obj.completion_context === null || typeof obj.completion_context === 'string')
   );
 }
 
@@ -101,6 +105,7 @@ export class PlannerDatabase {
           completion_condition TEXT NOT NULL,
           status TEXT CHECK(status IN ('in_progress', 'completed', 'failed')) DEFAULT 'in_progress',
           step_order INTEGER NOT NULL,
+          completion_context TEXT,
           created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
           FOREIGN KEY(plan_id) REFERENCES plans(id)
         )
@@ -140,11 +145,12 @@ export class PlannerDatabase {
     planId: string,
     description: string,
     completionCondition: string,
+    completionContext: string | null = null
   ): Promise<number> {
     return new Promise((resolve, reject) => {
       this.db.run(
-        'INSERT INTO steps (id, plan_id, description, completion_condition, step_order) VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(step_order), 0) + 1 FROM steps WHERE plan_id = ?))',
-        [stepId, planId, description, completionCondition, planId],
+        'INSERT INTO steps (id, plan_id, description, completion_condition, step_order, completion_context) VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(step_order), 0) + 1 FROM steps WHERE plan_id = ?), ?)',
+        [stepId, planId, description, completionCondition, planId, completionContext],
         function (this: { changes: number }, err: SqliteError | null) {
           if (err) return reject(err);
           resolve(this.changes);
@@ -254,13 +260,14 @@ export class PlannerDatabase {
     planId: string,
     description: string,
     completionCondition: string,
+    completionContext: string | null = null
   ): Promise<Step> {
     const stepId = generateReadableId();
 
     try {
       await this.beginTransaction();
 
-      await this.insertStep(stepId, planId, description, completionCondition);
+      await this.insertStep(stepId, planId, description, completionCondition, completionContext);
 
       const stepCount = await this.getStepCount(planId);
 
@@ -345,11 +352,11 @@ export class PlannerDatabase {
     });
   }
 
-  private async markStepCompleted(stepId: string): Promise<void> {
+  private async markStepCompleted(stepId: string, completionContext: string): Promise<void> {
     return new Promise((resolve, reject) => {
       this.db.run(
-        'UPDATE steps SET status = "completed" WHERE id = ?',
-        [stepId],
+        'UPDATE steps SET status = "completed", completion_context = ? WHERE id = ?',
+        [completionContext, stepId],
         (err: SqliteError | null) => {
           if (err) reject(err);
           else resolve();
@@ -358,11 +365,11 @@ export class PlannerDatabase {
     });
   }
 
-  async completeStep(stepId: string): Promise<Step | null> {
+  async completeStep(stepId: string, completionContext: string): Promise<Step | null> {
     try {
       await this.beginTransaction();
 
-      await this.markStepCompleted(stepId);
+      await this.markStepCompleted(stepId, completionContext);
 
       const planId = await this.getPlanForStep(stepId);
       const nextStep = await this.getNextStep(planId, stepId);
@@ -440,6 +447,7 @@ export class PlannerDatabase {
         failedStep.plan_id,
         newStepDescription,
         newStepCompletionCondition,
+        null
       );
 
       // Set the new step as active
